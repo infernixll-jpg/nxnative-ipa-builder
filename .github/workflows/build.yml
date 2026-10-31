@@ -13,14 +13,14 @@ on:
           - "iPhone 15 or older (BC fallback)"
           - "iPhone 15 Pro/Pro Max or newer (standard)"
 
+      base_title_id:
+        description: "Base game's 16-character hexadecimal Title ID"
+        required: true
+        type: string
+        default: "0100F43008C44000"
+
       profile_id:
         description: "Optional nxnative shader profile ID override"
-        required: false
-        type: string
-        default: ""
-
-      base_title_id:
-        description: "Actual base game's 16-character hexadecimal Title ID"
         required: false
         type: string
         default: ""
@@ -62,8 +62,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           brew install xcodegen zstd spirv-cross unar
+
           python -m pip install --upgrade pip
+
           python -m pip install \
             lz4 capstone fonttools backports.zstd gdown
 
@@ -126,6 +129,7 @@ jobs:
           )"
 
             echo "Downloading $(basename "$output")..."
+
             gdown "$file_id" -O "$output"
 
             if [[ ! -s "$output" ]]; then
@@ -308,8 +312,7 @@ jobs:
 
           for package in packages:
               print(
-                  f"{package.name}: "
-                  f"{package.stat().st_size:,} bytes"
+                  f"{package.name}: {package.stat().st_size:,} bytes"
               )
           PY
 
@@ -317,8 +320,8 @@ jobs:
 
       - name: Detect game title ID and select shader profile
         env:
-          PROFILE_OVERRIDE: ${{ inputs.profile_id }}
           BASE_TITLE_ID: ${{ inputs.base_title_id }}
+          PROFILE_OVERRIDE: ${{ inputs.profile_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -333,29 +336,27 @@ jobs:
           from pathlib import Path
 
           root = Path(sys.argv[1])
-          supplied_id = os.environ.get(
-              "BASE_TITLE_ID", ""
-          ).strip()
 
-          # Use manually supplied base Title ID if provided.
-          if supplied_id:
-              if not re.fullmatch(
-                  r"[0-9A-Fa-f]{16}", supplied_id
-              ):
+          manual_id = os.environ.get(
+              "BASE_TITLE_ID", ""
+          ).strip().upper()
+
+          if manual_id:
+              if not re.fullmatch(r"[0-9A-F]{16}", manual_id):
                   raise SystemExit(
-                      "BASE_TITLE_ID must contain exactly "
+                      "Base Title ID must contain exactly "
                       "16 hexadecimal characters."
                   )
 
-              title_id = int(supplied_id, 16)
+              title_id = int(manual_id, 16)
 
-              if title_id & 0xFFF:
+              if (title_id & 0xFFF) != 0:
                   raise SystemExit(
-                      "BASE_TITLE_ID does not have a base-game "
-                      "Title ID format."
+                      "The supplied Title ID does not appear "
+                      "to be a base-game Title ID."
                   )
 
-              print(f"{title_id:016X}")
+              print(manual_id)
               raise SystemExit(0)
 
           extensions = {
@@ -367,20 +368,14 @@ jobs:
                   with path.open("rb") as f:
                       header = f.read(16)
 
-                      if (
-                          len(header) != 16
-                          or header[:4] != b"PFS0"
-                      ):
+                      if len(header) != 16 or header[:4] != b"PFS0":
                           return []
 
                       count, string_size = struct.unpack_from(
                           "<II", header, 4
                       )
 
-                      if (
-                          count > 100000
-                          or string_size > 100000000
-                      ):
+                      if count > 100000 or string_size > 100000000:
                           return []
 
                       entries = f.read(count * 0x18)
@@ -393,9 +388,7 @@ jobs:
 
                       for i in range(count):
                           offset = struct.unpack_from(
-                              "<I",
-                              entries,
-                              i * 0x18 + 0x10
+                              "<I", entries, i * 0x18 + 0x10
                           )[0]
 
                           if offset >= len(strings):
@@ -420,17 +413,15 @@ jobs:
           candidates = set()
 
           for path in root.iterdir():
-              if (
-                  not path.is_file()
-                  or path.suffix.lower() not in extensions
-              ):
+              if not path.is_file():
                   continue
 
-              # Attempt detection through ticket metadata.
+              if path.suffix.lower() not in extensions:
+                  continue
+
               for name in pfs0_names(path):
                   match = re.fullmatch(
-                      r"([0-9A-Fa-f]{16})"
-                      r"[0-9A-Fa-f]{16}\.tik",
+                      r"([0-9A-Fa-f]{16})[0-9A-Fa-f]{16}\.tik",
                       name,
                   )
 
@@ -442,7 +433,6 @@ jobs:
                               f"{title_id:016X}"
                           )
 
-              # Attempt detection through the filename.
               match = re.search(
                   r"\[([0-9A-Fa-f]{16})\]",
                   path.name,
@@ -458,10 +448,9 @@ jobs:
 
           if len(candidates) != 1:
               raise SystemExit(
-                  "Could not uniquely identify the base "
-                  "game's title ID. "
+                  "Could not uniquely identify the base game's title ID. "
                   f"Candidates found: {sorted(candidates)}. "
-                  "Provide the base_title_id workflow input."
+                  "Provide BASE_TITLE_ID manually."
               )
 
           print(next(iter(candidates)))
@@ -469,9 +458,7 @@ jobs:
           )"
 
           PROFILE_ID="${PROFILE_OVERRIDE:-$DETECTED_ID}"
-          PROFILE_ID="$(
-            echo "$PROFILE_ID" | tr '[:lower:]' '[:upper:]'
-          )"
+          PROFILE_ID="$(echo "$PROFILE_ID" | tr '[:lower:]' '[:upper:]')"
 
           if [[ ! "$PROFILE_ID" =~ ^[0-9A-F]{16}$ ]]; then
             echo "::error::Profile ID must be exactly 16 hexadecimal characters."
@@ -500,8 +487,28 @@ jobs:
             exit 1
           fi
 
-          python "$CHAIN_SCRIPT" --update-lock
+          TOOL_DIR="$(dirname "$CHAIN_SCRIPT")"
+          TOOL_LOCK="$TOOL_DIR/tool_lock.py"
+
+          echo "Found shader chain script: $CHAIN_SCRIPT"
+
+          if [[ -f "$TOOL_LOCK" ]]; then
+            echo "Modern nxnative tool-lock system detected."
+
+            echo "Checking shader toolchain..."
+            python "$TOOL_LOCK" --check-tools
+
+          else
+            echo "Legacy BC fallback tool-lock system detected."
+
+            echo "Updating shader toolchain lock..."
+            python "$CHAIN_SCRIPT" --update-lock
+          fi
+
+          echo "Generating shader chain header..."
           python "$CHAIN_SCRIPT" --header
+
+          echo "Shader toolchain preparation completed."
 
       - name: Build unsigned IPA
         shell: bash
@@ -523,6 +530,7 @@ jobs:
           fi
 
           echo "IPA successfully created: $OUTPUT"
+
           ls -lh "$OUTPUT"
 
       - name: Upload IPA
